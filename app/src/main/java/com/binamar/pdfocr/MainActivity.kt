@@ -1,12 +1,12 @@
 package com.binamar.pdfocr
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.*
 import android.graphics.*
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
-import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -50,20 +50,65 @@ class MainActivity : Activity() {
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         val uri = data?.data
         if (res != RESULT_OK || uri == null) return
-        if (req == 1) ocr(uri) else if (req == 2) {
+        if (req == 1) choose(uri) else if (req == 2) {
             contentResolver.openOutputStream(uri)?.use { it.write(out.text.toString().toByteArray()) }
             Toast.makeText(this, "تم الحفظ", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun ocr(uri: Uri) {
+    private fun choose(uri: Uri) {
+        val n: Int
+        try {
+            val pfd = contentResolver.openFileDescriptor(uri, "r")!!
+            val r = PdfRenderer(pfd); n = r.pageCount; r.close(); pfd.close()
+        } catch (e: Exception) { status.text = "خطأ: ${e.message}"; return }
+        val lv = ListView(this).apply {
+            choiceMode = ListView.CHOICE_MODE_MULTIPLE
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_multiple_choice, (1..n).map { "صفحة $it" })
+            layoutParams = LinearLayout.LayoutParams(-1, 700)
+        }
+        fun sel(f: (Int) -> Boolean) { for (i in 0 until n) lv.setItemChecked(i, f(i)) }
+        val half = (n + 1) / 2
+        val inv: (Int) -> Boolean = { !lv.isItemChecked(it) }
+        val opts = listOf<Pair<String, (Int) -> Boolean>>(
+            "الكل" to { true }, "لا شيء" to { false },
+            "النصف الأول" to { it < half }, "النصف الثاني" to { it >= half },
+            "عكس" to inv, "فردية" to { it % 2 == 0 }, "زوجية" to { it % 2 == 1 }
+        )
+        val bar = LinearLayout(this)
+        opts.forEach { (t, f) -> bar.addView(Button(this).apply { text = t; setOnClickListener { sel(f) } }) }
+        val scroll = HorizontalScrollView(this).apply { addView(bar) }
+        val range = EditText(this).apply { hint = "نطاق مثل: 1-5,8,10-12"; layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
+        val apply = Button(this).apply {
+            text = "تطبيق"
+            setOnClickListener {
+                val s = HashSet<Int>()
+                range.text.toString().split(",").forEach { part ->
+                    val p = part.trim().split("-")
+                    val a = p[0].trim().toIntOrNull(); val c = p.getOrNull(1)?.trim()?.toIntOrNull() ?: a
+                    if (a != null && c != null) for (k in a..c) if (k in 1..n) s.add(k - 1)
+                }
+                sel { it in s }
+            }
+        }
+        val rrow = LinearLayout(this).apply { addView(range); addView(apply) }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(16, 16, 16, 0); addView(scroll); addView(rrow); addView(lv) }
+        sel { true }
+        AlertDialog.Builder(this).setTitle("اختر الصفحات (المجموع $n)").setView(box)
+            .setPositiveButton("استخراج") { _, _ ->
+                val pages = (0 until n).filter { lv.isItemChecked(it) }
+                if (pages.isEmpty()) Toast.makeText(this, "لم تختر أي صفحة", Toast.LENGTH_SHORT).show() else ocr(uri, pages)
+            }.setNegativeButton("إلغاء", null).show()
+    }
+
+    private fun ocr(uri: Uri, pages: List<Int>) {
         out.setText("")
         Thread {
             try {
                 val r = PdfRenderer(contentResolver.openFileDescriptor(uri, "r")!!)
                 val rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-                for (i in 0 until r.pageCount) {
-                    runOnUiThread { status.text = "صفحة ${i + 1} من ${r.pageCount}" }
+                pages.forEachIndexed { k, i ->
+                    runOnUiThread { status.text = "صفحة ${i + 1} (${k + 1} من ${pages.size})" }
                     val p = r.openPage(i)
                     val bmp = Bitmap.createBitmap((p.width * 2.5f).toInt(), (p.height * 2.5f).toInt(), Bitmap.Config.ARGB_8888)
                     bmp.eraseColor(Color.WHITE)
